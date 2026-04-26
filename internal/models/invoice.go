@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type InvoiceStatus string
 
 const (
@@ -17,8 +19,16 @@ type Invoice struct {
 	Issuer      Entity         `json:"issuer" firestore:"issuer"`     // Copia da Registry
 	Receiver    Entity         `json:"receiver" firestore:"receiver"` // Copia da Registry
 	Totals      Totals         `json:"totals" firestore:"totals"`
+	Dates       InvoiceDates   `json:"dates" firestore:"dates"`             // <-- CAMPO AGGIUNTO
 	DocumentRef string         `json:"documentRef" firestore:"documentRef"` // Link a Document Service
 	Metadata    map[string]any `json:"metadata" firestore:"metadata"`
+}
+
+// Struttura per gestire le date del documento
+type InvoiceDates struct {
+	Document time.Time  `json:"document" firestore:"document"`
+	Due      time.Time  `json:"due" firestore:"due"`
+	Paid     *time.Time `json:"paid" firestore:"paid"` // Puntatore perché all'inizio è null
 }
 
 type Totals struct {

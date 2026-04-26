@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"time"
 
-	"finance-service/internal/models"
-	"finance-service/internal/repository"
-	"ssg-nexus-sdk/pkg/nexus"
+	"github.com/DaniFX/ssg-finance-service/internal/models"
+	"github.com/DaniFX/ssg-finance-service/internal/repository"
+	"github.com/DaniFX/ssg-nexus-sdk/pkg/nexus"
 )
 
 type FinanceService struct {
@@ -29,7 +29,22 @@ func NewFinanceService(repo repository.FinanceRepository, nc *nexus.NexusClient,
 	}
 }
 
-// IssueInvoice implementa il Locking e la chiamata al Document Service
+// UpdateInvoice aggiorna una fattura (utile per i DRAFT). Implementa il locking.
+func (s *FinanceService) UpdateInvoice(ctx context.Context, inv models.Invoice) error {
+	existing, err := s.repo.GetInvoice(ctx, inv.ID)
+	if err != nil {
+		return err
+	}
+
+	// Regola ERP: Se ISSUED, il documento è immutabile e non può essere aggiornato manualmente
+	if existing.Status == models.StatusIssued || existing.Metadata["immutable"] == true {
+		return errors.New("cannot update an issued invoice")
+	}
+
+	return s.repo.UpdateInvoice(ctx, inv)
+}
+
+// IssueInvoice implementa il Locking e la chiamata al Document Service per l'emissione
 func (s *FinanceService) IssueInvoice(ctx context.Context, invoiceID string) error {
 	invoice, err := s.repo.GetInvoice(ctx, invoiceID)
 	if err != nil {
@@ -42,7 +57,6 @@ func (s *FinanceService) IssueInvoice(ctx context.Context, invoiceID string) err
 	}
 
 	// 2. Generazione numero sequenziale (Semplificata per l'esempio)
-	// In produzione richiederebbe una transazione Firestore per incrementare un contatore sicuro
 	invoice.ExternalID = fmt.Sprintf("SDI-%d-%s", time.Now().Year(), invoice.ID[:6])
 
 	// 3. Chiamata HTTP al Document Service per generare/salvare il PDF
@@ -63,7 +77,7 @@ func (s *FinanceService) IssueInvoice(ctx context.Context, invoiceID string) err
 	return s.repo.UpdateInvoice(ctx, *invoice)
 }
 
-// RegisterPayment registra l'entrata nel ledger e applica la Riconciliazione
+// RegisterPayment registra l'entrata nel ledger e applica la Riconciliazione (Ex Reconcile)
 func (s *FinanceService) RegisterPayment(ctx context.Context, entry models.LedgerEntry) error {
 	entry.Timestamp = time.Now()
 
@@ -72,7 +86,7 @@ func (s *FinanceService) RegisterPayment(ctx context.Context, entry models.Ledge
 		return err
 	}
 
-	// 2. Logica di Riconciliazione
+	// 2. Logica di Riconciliazione (Sostituisce il vecchio metodo Reconcile)
 	totalPaid, err := s.repo.GetTotalPaidForInvoice(ctx, entry.InvoiceID)
 	if err != nil {
 		return err
@@ -109,14 +123,12 @@ func (s *FinanceService) generateDocument(ctx context.Context, invoice *models.I
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Usiamo il NexusClient per propagare gli header X-Nexus-User-ID e X-Nexus-Role
 	resp, err := s.nexusClient.Do(ctx, req)
 	if err != nil || resp.StatusCode >= 400 {
 		return "", errors.New("fallita chiamata al Document Service")
 	}
 	defer resp.Body.Close()
 
-	// Ipotizziamo che il Document Service restituisca un { "data": { "documentId": "DOC-XYZ" } }
 	var result struct {
 		Data struct {
 			DocumentID string `json:"documentId"`

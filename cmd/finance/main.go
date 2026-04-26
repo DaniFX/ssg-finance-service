@@ -1,40 +1,83 @@
 package main
 
 import (
-	"finance-service/internal/handlers"
-	"finance-service/internal/repository"
 	"log"
-	"ssg-nexus-sdk/pkg/nexus"
+	"os"
 
+	"github.com/DaniFX/ssg-nexus-sdk/pkg/nexus"
 	"github.com/gin-gonic/gin"
+
+	"github.com/DaniFX/ssg-finance-service/internal/handlers"
+	"github.com/DaniFX/ssg-finance-service/internal/repository"
+	"github.com/DaniFX/ssg-finance-service/internal/services"
 )
 
 func main() {
+	// 1. Configurazione Ambiente
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if projectID == "" {
+		log.Println("WARNING: GOOGLE_CLOUD_PROJECT non settato. Usando default.")
+		projectID = "ssg-nexus-dev"
+	}
+
+	// 2. Inizializzazione Repository e Service
+	repo, err := repository.NewFinanceRepository(projectID)
+	if err != nil {
+		log.Fatalf("Errore avvio Firestore: %v", err)
+	}
+
+	// Inizializziamo il NexusClient dell'SDK per le chiamate inter-service
+	nexusClient := &nexus.NexusClient{}
+	docServiceURL := os.Getenv("DOCUMENT_SERVICE_URL")
+
+	financeSvc := services.NewFinanceService(repo, nexusClient, docServiceURL)
+
 	r := gin.Default()
 
-	// Inizializzazione Repository Firestore (Seguendo il pattern ssg-db)
-	repo, err := repository.NewFirestoreRepository("project-id")
-	if err != nil {
-		log.Fatalf("Errore Firestore: %v", err)
+	// 3. Service Definition e Handshake (Novità)
+	// Definiamo il contratto del servizio per il Gateway
+	def := nexus.ServiceDefinition{
+		ServiceName: "finance-service",
+		Version:     "1.0.0",
+		Endpoints: []nexus.Endpoint{
+			{
+				Path:         "/api/v1/finance/invoices/:id/issue",
+				Method:       "PATCH",
+				AuthRequired: true,
+				Summary:      "Emette una fattura e la rende immutabile",
+			},
+			{
+				Path:         "/api/v1/finance/ledger",
+				Method:       "POST",
+				AuthRequired: true,
+				Summary:      "Registra un pagamento nel libro giornale",
+			},
+		},
 	}
 
-	// Middleware globale di sicurezza dall'SDK
-	r.Use(nexus.NexusGuard())
+	// Registra automaticamente l'endpoint GET /_discover
+	nexus.RegisterDiscovery(r, def)
 
-	// Gruppo API V1
-	v1 := r.Group("/api/v1")
+	// Avvia l'handshake (PUSH) verso il Gateway per la registrazione dinamica
+	nexus.StartGatewayHandshake(def)
+
+	// 4. Rotte di Business (PROTETTE DAL GUARD)
+	api := r.Group("/api/v1/finance")
+
+	// Applichiamo il middleware di sicurezza dell'SDK
+	api.Use(nexus.Guard())
 	{
-		// Invoices
-		v1.POST("/invoices", handlers.CreateInvoice(repo))
-		v1.PATCH("/invoices/:id/issue", handlers.IssueInvoice(repo))
-
-		// Ledger (Libro Giornale)
-		v1.POST("/ledger", handlers.RegisterTransaction(repo))
+		api.PATCH("/invoices/:id/issue", handlers.IssueInvoice(financeSvc))
+		api.POST("/ledger", handlers.RegisterTransaction(financeSvc))
 	}
 
-	// Endpoint richiesto per il Service Discovery del Gateway
-	r.GET("/_discover", handlers.GetDiscovery)
-
-	log.Println("Finance Service in ascolto sulla porta 8080...")
-	r.Run(":8080")
+	log.Printf("Finance Service avviato sulla porta %s...\n", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Errore critico: %v", err)
+	}
 }
